@@ -1,7 +1,9 @@
+
 CC = c++
+CPPFLAGS = -std=c++11 -Wall
 
 filter: bloom-filter/bloom-filter.cc
-	${CC} -std=c++11 -o filter bloom-filter/bloom-filter.cc
+	$(CC) $(CPPFLAGS) -o filter bloom-filter/bloom-filter.cc
 
 
 .PHONE: clean
