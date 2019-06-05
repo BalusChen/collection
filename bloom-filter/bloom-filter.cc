@@ -111,7 +111,7 @@ class BloomFilter {
         }
 
         bool KeyMayMatch(const std::string &key,
-            const std::string &bloom_filter)
+            const std::string &bloom_filter) const
         {
             const size_t len = bloom_filter.size();
             if (len < 2) {
