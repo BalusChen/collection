@@ -1,4 +1,10 @@
+
+/*
+ * Copyright (C) Jianyong Chen
+ */
+
 #include "../include/hash.h"
+#include <vector>
 
 
 static uint32_t BloomHash(const std::string &key) {
@@ -10,6 +16,35 @@ class BloomFilter {
     private:
         size_t bits_per_key_;
         size_t k_;
+        std::string bitmap_;
+        std::vector<std::string> *keys_;
+
+
+        void Resize() {
+            // 位图扩大一倍
+            const size_t  new_size = bitmap_.size() << 1;
+            std::string  new_bitmap = std::string(new_size, 0);
+            bitmap_ = new_bitmap;
+
+            for (const auto &key : *keys_) {
+                _AddKey(key);
+            }
+        }
+
+
+        void _AddKey(const std::string &key) {
+            const size_t  bits = bitmap_.size() * 8;
+            char  *array = &bitmap_[0];
+            uint32_t  h = BloomHash(key);
+            const uint32_t  delta = (h >> 17) | (h << 15);
+
+            for (int i = 0; i < k_; i++) {
+                const uint32_t  bitpos = h % bits;
+                array[bitpos/8] |= (1 << (bitpos % 8));
+                h += delta;
+            }
+        }
+
 
     public:
         explicit BloomFilter(int bits_per_key)
@@ -24,63 +59,49 @@ class BloomFilter {
             if (k_ > 30) {
                 k_ = 30;
             }
+
+            // 初始化 key 集合大小为 64
+            keys_ = new std::vector<std::string>;
+            keys_->reserve(64);
         }
 
 
-        void CreteFileter(const std::string *keys,
-            int n, std::string *dst) const
-        {
-            size_t  bits = n * bits_per_key_;
-
-            // 如果位图很小，那么误判率就会很高，所以适当扩大
-            if (bits < 64) {
-                bits = 64;
+        void AddKey(const std::string &key) {
+            if (bitmap_.empty()) {
+                // 将位图的初始大小设置为 8 * 8 bits
+                bitmap_.resize(8, 0);
             }
 
-            // 位图所占字节数，以及将 bit 数向上取整为 8 的倍数
-            size_t bytes = (bits + 7) / 8;
-            bits = bytes * 8;
-
-            // 为什么要这两句
-            const size_t init_size = dst->size();
-            dst->resize(init_size + bytes, 0);
-            // 这里把 hash 所用的次数也存进去
-            dst->push_back(static_cast<char>(k_));
-
-            char *array = &(*dst)[init_size];
-            for (int i = 0; i < n; i++) {
-                uint32_t h = BloomHash(keys[i]);
-                // 向右旋转 17bit
-                const uint32_t delta = (h >> 17) | (h << 15);
-                // 本来应该进行 k_ 次 hash
-                // 但是这里为了速度就使用上一轮的 hash 值来得到新的 hash 值
-                for (size_t j = 0; j < k_; j++) {
-                    const uint32_t bitpos = h % bits;
-                    array[bitpos/8] |= (1 << (bitpos % 8));
-                    h += delta;
-                }
+            /*
+             * 随着 key 的添加，误判率会变高，所以需要及时扩大位图
+             */
+            if (bitmap_.size() * 8 <= keys_->size() * bits_per_key_) {
+                Resize();
             }
+
+            _AddKey(key);
+
+            keys_->push_back(key);
         }
 
-        bool KeyMayMatch(const std::string &key,
-            const std::string &bloom_filter) const
-        {
-            const size_t len = bloom_filter.size();
-            if (len < 2) {
+
+
+        bool KeyMayMatch(const std::string &key) const {
+            if (bitmap_.empty()) {
                 return false;
             }
 
-            const char *array = bloom_filter.data();
-            const size_t bits = (len - 1) * 8;
-            const size_t k = array[len-1];
+            const size_t len = bitmap_.size();
+            const char *array = bitmap_.data();
+            const size_t bits = len * 8;
 
-            if (k > 30) {
+            if (k_ > 30) {
                 return true;
             }
 
             uint32_t h = BloomHash(key);
             const uint32_t delta = (h >> 17) | (h << 15);
-            for (size_t j = 0; j < k; j++) {
+            for (size_t j = 0; j < k_; j++) {
                 // 依次计算每一轮的 hash
                 // 只有有一个位置不为 1，就说明 key 不在集合中
                 const uint32_t bitpos = h % bits;
@@ -102,18 +123,29 @@ main(int argc, char **argv)
     std::string  bitmap;
     BloomFilter  bloom_filter(3);
 
-    std::string keys[] = { "abc", "leveldb", "moon" };
+    std::vector<std::string> keys =
+        { "abc", "leveldb", "moon", "funny", "lucy", "tommy",
+          "rimbaud", "tom", "pikazza", "chythia", "kolo", "meetyou" };
+    std::vector<std::string> keys2 =
+        { "hello", "world", "who", "programming language pragmatics",
+          "jerry", "sam", "nice", "whoami", "locate", "network", "iamyou" };
 
-    bloom_filter.CreteFileter(keys, 3, &bitmap);
-    exist = bloom_filter.KeyMayMatch("funny", bitmap);
-    printf("exist(%s): %d\n", "funny", exist);
+
+    for (int i = 0; i < keys.size(); i++) {
+        bloom_filter.AddKey(keys[i]);
+    }
 
 
-    printf("bitmap: %s(%ld)\n", bitmap.c_str(), bitmap.size());
-
-    for (int i = 0; i < 3; i++) {
-        exist = bloom_filter.KeyMayMatch(keys[i], bitmap);
+    for (int i = 0; i < keys.size(); i++) {
+        exist = bloom_filter.KeyMayMatch(keys[i]);
         printf("exist(%s): %d\n", keys[i].c_str(), exist);
+    }
+
+    printf("\n");
+
+    for (int i = 0; i < keys2.size(); i++) {
+        exist = bloom_filter.KeyMayMatch(keys2[i]);
+        printf("exist(%s): %d\n", keys2[i].c_str(), exist);
     }
 
     return 0;
