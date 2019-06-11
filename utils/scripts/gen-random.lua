@@ -3,12 +3,6 @@
 -- Copyright (C) Jianyong Chen
 --]]
 
-
-for i, v in ipairs(arg) do
-    print(i, v);
-end
-
-
 if #arg ~= 2 then
     error("usage: lua gen-random.lua <#files> <#nums/file>")
 end
