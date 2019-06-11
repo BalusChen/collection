@@ -17,16 +17,13 @@ local maxnum1 = 100000
 local maxnum2 = 100
 local nfiles = tonumber(arg[1])
 local nnums = tonumber(arg[2]);
-local first, second
-local file
-
 
 for i = 1, nfiles do
-    file = io.open("file-" .. i, "w")
+    local file = io.open("file-" .. i, "w")
 
     for j = 1, nnums do
-        first = math.floor(math.random() * maxnum1 + 1)
-        second = math.floor(math.random() * maxnum2 + 1)
+        local first = math.floor(math.random() * maxnum1 + 1)
+        local second = math.floor(math.random() * maxnum2 + 1)
 
         file:write(string.format("%d\t%d\n", first, second))
     end
