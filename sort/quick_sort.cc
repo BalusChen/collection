@@ -18,7 +18,7 @@ void
 QuickSorter::sort(std::vector<int> &nums, int left, int right)
 {
     if (left + 10 <= right) {
-        const int pivot = three_median(nums, left, right);
+        const int pivot = median3(nums, left, right);
 
         int  i = left, j = right - 1;
         for ( ;; ) {
@@ -44,7 +44,7 @@ QuickSorter::sort(std::vector<int> &nums, int left, int right)
 
 
 int
-QuickSorter::three_median(std::vector<int> &nums, int left, int right)
+QuickSorter::median3(std::vector<int> &nums, int left, int right)
 {
     int  center = (left + right) / 2;
 

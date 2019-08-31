@@ -18,7 +18,7 @@ class QuickSorter
     private:
         void sort(std::vector<int> &, int, int);
         void insertion_sort(std::vector<int> &, int, int);
-        int three_median(std::vector<int> &, int, int);
+        int median3(std::vector<int> &, int, int);
 };
 
 
