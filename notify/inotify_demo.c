@@ -5,11 +5,14 @@
 
 #include <stdio.h>
 #include <unistd.h>
+#include <errno.h>
 #include <string.h>
 #include <stdlib.h>
 #include <sys/inotify.h>
 #include <sys/epoll.h>
 
+#define STOP                        "stop"
+#define NEWLINE                     '\n'
 #define MAX_LINE                    1024
 #define MAX_EPOLL_EVENTS            10
 #define INOTIFY_EVENTS_BUF_SIZE     (sizeof(struct inotify_event) * 10)
@@ -17,6 +20,7 @@
 
 static int handle_stdin(int fd);
 static int handle_inotify(int fd);
+static ssize_t readline(int fd, void *vptr, size_t maxlen);
 static void dump_inotify_event(struct inotify_event *ie);
 
 
@@ -65,7 +69,7 @@ main(int argc, char **argv)
         printf("[inotify] watch: %s\n", argv[i]);
     }
 
-    printf("[inotify] start to listen, enter \"stop\"<enter> to leave...\n");
+    printf("[inotify] start to listen, enter \"stop<enter>\" to leave...\n");
 
     for ( ;; ) {
         nfds = epoll_wait(epfd, events, MAX_EPOLL_EVENTS, -1);
@@ -101,35 +105,19 @@ static int
 handle_stdin(int fd)
 {
     int   n, size;
-    char  *p, buf[MAX_LINE];
+    char  buf[MAX_LINE];
 
-    for (p = buf, size = sizeof(buf); size != 0; /* void */ ) {
-        n = read(fd, buf, size);
-        if (n < 0) {
-            perror("[inotify] read from stdin failed");
-            exit(EXIT_FAILURE);
+    n = readline(fd, buf, MAX_LINE);
+    if (n == sizeof(STOP) - 1 && strncmp(buf, STOP, sizeof(STOP) - 1) == 0) {
+        printf("[inotify] receive stop directive, bye bye...\n");
+        exit(EXIT_SUCCESS);
 
-        } else if (n == 0) {
-
-            if ((p - buf) != sizeof("stop")
-                || strncmp(buf, "stop", sizeof("stop")) == 0)
-            {
-                printf("[inotify] read from stdin: \"%s\", unexpected message\n", buf);
-                break;
-            }
-
-            printf("[inotify] bye bye...\n");
-            exit(EXIT_SUCCESS);
-
-        } else {
-            p += n;
-            size -= n;
-            if (size == 0) {
-                fprintf(stderr, "[inotify] input too long\n");
-                exit(EXIT_FAILURE);
-            }
-        }
+    } else if (n == -1) {
+        perror("[inotify] read from stdin error");
+        exit(EXIT_FAILURE);
     }
+
+    printf("[inotify] unknown directive \"%s\" from stdin, skip...\n", buf);
 
     return 0;
 }
@@ -161,6 +149,46 @@ handle_inotify(int fd)
 
     return 0;
 }
+
+
+static ssize_t
+readline(int fd, void *vptr, size_t maxlen)
+{
+    char     c, *ptr;
+    ssize_t  n, rc;
+
+    ptr = vptr;
+    for (n = 1; n < maxlen; n++) {
+again:
+        rc = read(fd, &c, 1);
+
+        if (rc == 1) {
+
+            if (c == NEWLINE) {
+                *ptr = 0;
+                return n - 1;
+            }
+
+            *ptr++ = c;
+
+        } else if (rc == 0) {
+            *ptr = 0;
+            return n - 1;
+
+        } else {
+
+            if (errno == EINTR) {
+                goto again;
+            }
+
+            return -1;
+        }
+    }
+
+    *ptr = 0;
+    return n;
+}
+
 
 static void
 dump_inotify_event(struct inotify_event *ie)
