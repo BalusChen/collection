@@ -249,6 +249,9 @@ watch_single_path_recursively(int infd, char *path, int flags)
             return watch_single_path(infd, path, flags);
         }
 
+        fprintf(stderr, "[inotify] open directory \"%s\" error: %s\n", path,
+                strerror(errno));
+
         return -1;
     }
 
