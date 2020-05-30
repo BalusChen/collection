@@ -9,80 +9,108 @@
 #include <string.h>
 #include <dirent.h>
 #include <stdlib.h>
-#include <sys/types.h>
 #include <sys/inotify.h>
 #include <sys/epoll.h>
+
+#include "../rbtree/rb_tree.h"
 
 
 #define STOP                        "stop"
 #define NEWLINE                     '\n'
 #define MAX_LINE                    1024
+#define MAX_PATH                    1024
 #define MAX_FILE_PATHS              1024
 #define MAX_EPOLL_EVENTS            10
 #define INOTIFY_EVENTS_BUF_SIZE     (sizeof(struct inotify_event) * 10)
 
 
-static int handle_stdin(int fd);
-static int handle_inotify(int fd);
-
-static int watch_single_path_recursively(int infd, char *path, int flags);
-static int watch_single_path(int infd, char *path, int flags);
-
-static void parse_options(int argc, char **argv);
-static void watch_paths(int infd);
-static void usage(FILE *fp);
-static ssize_t readline(int fd, void *vptr, size_t maxlen);
-static void dump_inotify_event(struct inotify_event *ie);
+typedef struct {
+    rbtree_node_t   node;
+    char            path[MAX_PATH];
+} inotify_wd_node_t;
 
 
 typedef struct {
-    unsigned   verbose:1;
-    unsigned   recursive:1;
-    char      *path_file;
-} options_t;
+    int             inotify_fd;
+
+    /* cli options */
+
+    unsigned        verbose:1;
+    unsigned        recursive:1;
+    char           *path_file;
+
+    /* map wd to path */
+
+    rbtree_t        wd_tree;
+    rbtree_node_t   wd_sentinel;
+
+    /* temporary array to store root paths specified in cli */
+
+    char           *file_paths[MAX_FILE_PATHS];
+    int             next_free_pos;
+} inotify_demo_ctx_t;
 
 
-static options_t  cli_options;
+static void inotify_parse_options(inotify_demo_ctx_t *ctx, int argc,
+    char **argv);
+static void inotify_init_ctx(inotify_demo_ctx_t  *ctx);
+static inotify_wd_node_t *inotify_rbtree_lookup(inotify_demo_ctx_t *ctx,
+    int wd);
 
-static char *file_paths[MAX_FILE_PATHS];
-static int   next_free_pos;
+static void inotify_watch_paths(inotify_demo_ctx_t *ctx);
+static int inotify_watch_single_path_recursively(inotify_demo_ctx_t *ctx,
+    char *path, int flags);
+static int inotify_watch_single_path(inotify_demo_ctx_t *ctx, char *path,
+    int flags);
+
+static int handle_stdin(inotify_demo_ctx_t *ctx);
+static int handle_inotify(inotify_demo_ctx_t *ctx);
+static ssize_t readline(int fd, void *vptr, size_t maxlen);
+static void inotify_usage(FILE *fp);
+static void inotify_dump_event(inotify_demo_ctx_t *ctx,
+    struct inotify_event *ie);
 
 
 int
 main(int argc, char **argv)
 {
-    int                 wd, i, nfds, ret, epfd, infd, flags;
+    int                 i, nfds, epfd, infd;
+    inotify_demo_ctx_t  ctx;
     struct epoll_event  ee, events[MAX_EPOLL_EVENTS];
 
-    parse_options(argc, argv);
+    inotify_init_ctx(&ctx);
+
+    inotify_parse_options(&ctx, argc, argv);
 
     epfd = epoll_create1(0);
     if (epfd == -1) {
-        perror("[inotify] epoll_create1() failed\n");
+        perror("[inotify] epoll_create1(0) failed");
         exit(EXIT_FAILURE);
     }
 
     infd = inotify_init1(0);
     if (infd == -1) {
-        perror("[inotify] inotify_init1(0) failed\n");
+        perror("[inotify] inotify_init1(0) failed");
         exit(EXIT_FAILURE);
     }
+
+    ctx.inotify_fd = infd;
 
     ee.events = EPOLLIN;
     ee.data.fd = STDIN_FILENO;
     if (epoll_ctl(epfd, EPOLL_CTL_ADD, STDIN_FILENO, &ee) < 0) {
-        perror("[inotify] epoll_ctl(ADD, stdin) failed\n");
+        perror("[inotify] epoll_ctl(ADD, stdin) failed");
         exit(EXIT_FAILURE);
     }
 
     ee.events = EPOLLIN;
     ee.data.fd = infd;
     if (epoll_ctl(epfd, EPOLL_CTL_ADD, infd, &ee) < 0) {
-        perror("[inotify] epoll_ctl(ADD, inotify_fd) failed\n");
+        perror("[inotify] epoll_ctl(ADD, inotify_fd) failed");
         exit(EXIT_FAILURE);
     }
 
-    watch_paths(infd);
+    inotify_watch_paths(&ctx);
 
     printf("[inotify] start to monitor, enter \"stop<enter>\" to leave...\n");
 
@@ -96,10 +124,10 @@ main(int argc, char **argv)
         for (i = 0; i < nfds; i++) {
 
             if (events[i].data.fd == STDIN_FILENO) {
-                handle_stdin(STDIN_FILENO);
+                handle_stdin(&ctx);
 
             } else if (events[i].data.fd == infd) {
-                handle_inotify(infd);
+                handle_inotify(&ctx);
 
             } else {
                 fprintf(stderr, "[inotify] unknown file descriptor: %d\n",
@@ -115,9 +143,52 @@ main(int argc, char **argv)
 
 
 static void
-parse_options(int argc, char **argv)
+inotify_init_ctx(inotify_demo_ctx_t *ctx)
 {
-    int    len, ch, wd;
+    rbtree_init(&ctx->wd_tree, &ctx->wd_sentinel, rbtree_insert_value);
+
+    ctx->verbose = 0;
+    ctx->recursive = 0;
+    memset(&ctx->file_paths, 0, sizeof(ctx->file_paths));
+    ctx->next_free_pos = 0;
+}
+
+
+static inotify_wd_node_t *
+inotify_rbtree_lookup(inotify_demo_ctx_t *ctx, int wd)
+{
+    rbtree_node_t      *node, *sentinel;
+    inotify_wd_node_t  *wn;
+
+    node = ctx->wd_tree.root;
+    sentinel = &ctx->wd_sentinel;
+
+    while (node != sentinel) {
+
+        if (wd < node->key) {
+            node = node->left;
+            continue;
+        }
+
+        if (wd > node->key) {
+            node = node->right;
+            continue;
+        }
+
+        /* wd == node->key */
+
+        wn = (inotify_wd_node_t *) node;
+        return wn;
+    }
+
+    return NULL;
+}
+
+
+static void
+inotify_parse_options(inotify_demo_ctx_t *ctx, int argc, char **argv)
+{
+    int    len, ch;
     char   *p, *path, buf[NAME_MAX];
     FILE  *fp;
 
@@ -125,20 +196,20 @@ parse_options(int argc, char **argv)
 
         switch (ch) {
         case 'v':
-            cli_options.verbose = 1;
+            ctx->verbose = 1;
             break;
 
         case 'r':
-            cli_options.recursive = 1;
+            ctx->recursive = 1;
             break;
 
         case '?':
         case 'h':
-            usage(stdout);
+            inotify_usage(stdout);
             exit(EXIT_SUCCESS);
 
         case 'p':
-            if (next_free_pos == MAX_FILE_PATHS) {
+            if (ctx->next_free_pos == MAX_FILE_PATHS) {
                 fprintf(stderr, "[inotify] too many paths to watch,"
                                 " upper limit: %d", MAX_FILE_PATHS);
                 exit(EXIT_FAILURE);
@@ -153,32 +224,32 @@ parse_options(int argc, char **argv)
 
             strncpy(p, optarg, len);
             p[len] = 0;
-            file_paths[next_free_pos++] = p;
+            ctx->file_paths[ctx->next_free_pos++] = p;
             break;
 
         case 'f':
-            cli_options.path_file = optarg;
+            ctx->path_file = optarg;
             break;
 
         default:
-            usage(stderr);
+            inotify_usage(stderr);
             exit(EXIT_FAILURE);
         }
     }
 
-    if (cli_options.path_file != NULL) {
-        fp = fopen(cli_options.path_file, "r");
+    if (ctx->path_file != NULL) {
+        fp = fopen(ctx->path_file, "r");
 
         if (fp == NULL) {
             fprintf(stderr, "[inotify] open \"%s\" error: %s",
-                    cli_options.path_file, strerror(errno));
+                    ctx->path_file, strerror(errno));
 
             exit(EXIT_FAILURE);
         }
 
         while ((path = fgets(buf, NAME_MAX, fp)) != NULL) {
 
-            if (next_free_pos == MAX_FILE_PATHS) {
+            if (ctx->next_free_pos == MAX_FILE_PATHS) {
                 fprintf(stderr, "[inotify] too many file to watch,"
                                 " upper limit: %d\n", MAX_FILE_PATHS);
 
@@ -195,34 +266,36 @@ parse_options(int argc, char **argv)
             strncpy(p, path, len);
             p[len] = 0;
 
-            file_paths[next_free_pos++] = p;
+            ctx->file_paths[ctx->next_free_pos++] = p;
         }
     }
 }
 
 
 static void
-watch_paths(int infd)
+inotify_watch_paths(inotify_demo_ctx_t *ctx)
 {
-    int     ret, i, wd, flags;
+    int     ret, i, flags;
 
-    if (cli_options.verbose && cli_options.recursive) {
+    if (ctx->verbose && ctx->recursive) {
         printf("[inotify] since \"-r\" option is specified, it may take a while"
                " to watch all paths recursively...\n");
     }
 
-    // FIXME: specify events in cli
+    // TODO: specify events in cli
 
     // flags = IN_CREATE | IN_MOVED_TO | IN_MOVED_FROM | IN_DELETE | IN_DELETE_SELF;
     flags = IN_ALL_EVENTS;
 
-    for (i = 0; i < next_free_pos; i++) {
+    for (i = 0; i < ctx->next_free_pos; i++) {
 
-        if (cli_options.recursive) {
-            ret = watch_single_path_recursively(infd, file_paths[i], flags);
+        if (ctx->recursive) {
+            ret = inotify_watch_single_path_recursively(ctx,
+                                                        ctx->file_paths[i],
+                                                        flags);
 
         } else {
-            ret = watch_single_path(infd, file_paths[i], flags);
+            ret = inotify_watch_single_path(ctx, ctx->file_paths[i], flags);
         }
 
         if (ret == -1) {
@@ -233,9 +306,9 @@ watch_paths(int infd)
 
 
 static int
-watch_single_path_recursively(int infd, char *path, int flags)
+inotify_watch_single_path_recursively(inotify_demo_ctx_t *ctx, char *path,
+    int flags)
 {
-    int             len;
     DIR            *dir;
     char            buf[NAME_MAX];
     struct dirent  *entry;
@@ -246,7 +319,7 @@ watch_single_path_recursively(int infd, char *path, int flags)
 
         // not directory, just watch it as a normal file.
         if (errno == ENOTDIR) {
-            return watch_single_path(infd, path, flags);
+            return inotify_watch_single_path(ctx, path, flags);
         }
 
         fprintf(stderr, "[inotify] open directory \"%s\" error: %s\n", path,
@@ -261,11 +334,6 @@ watch_single_path_recursively(int infd, char *path, int flags)
 
         if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
         {
-            if (cli_options.verbose) {
-                printf("[inotify] meet dir itself or parent dir of \"%s\" "
-                       "skip...\n", path);
-            }
-
             continue;
         }
 
@@ -273,62 +341,70 @@ watch_single_path_recursively(int infd, char *path, int flags)
 
         if (entry->d_type == DT_DIR) {
 
-            if (watch_single_path_recursively(infd, buf, flags) == -1)
+            if (inotify_watch_single_path_recursively(ctx, buf, flags) == -1)
             {
                 return -1;
             }
 
         } else if (entry->d_type == DT_REG) {
 
-            if (watch_single_path(infd, buf, flags) == -1) {
+            if (inotify_watch_single_path(ctx, buf, flags) == -1) {
                 return -1;
             }
 
         } else {
 
-            if (cli_options.verbose) {
-                printf("[inotify] meet %s, not regular file or directory, "
-                       "skip...\n", buf);
+            if (ctx->verbose) {
+                printf("[inotify] \"%s\" is not directory or regular file,"
+                       " skip...\n", buf);
             }
         }
     }
 
     (void) closedir(dir);
 
-    if (watch_single_path(infd, path, flags) == -1) {
+    return inotify_watch_single_path(ctx, path, flags);
+}
+
+
+static int
+inotify_watch_single_path(inotify_demo_ctx_t *ctx, char *path, int flags)
+{
+    int                 wd;
+    inotify_wd_node_t  *wn;
+
+    if (ctx->verbose) {
+        printf("[inotify] watch \"%s\"\n", path);
+    }
+
+    wd = inotify_add_watch(ctx->inotify_fd, path, flags);
+    if (wd == -1) {
+        fprintf(stderr, "[inotify] watch \"%s\" error: %s\n", path,
+                strerror(errno));
         return -1;
     }
+
+    wn = malloc(sizeof(inotify_wd_node_t));
+    if (wn == NULL) {
+        return -1;
+    }
+
+    wn->node.key = wd;
+    strcpy(wn->path, path);
+
+    rbtree_insert(&ctx->wd_tree, &wn->node);
 
     return 0;
 }
 
 
 static int
-watch_single_path(int infd, char *path, int flags)
-{
-    int     wd;
-
-    if (cli_options.verbose) {
-        printf("[inotify] watch \"%s\"\n", path);
-    }
-
-    wd = inotify_add_watch(infd, path, flags);
-    if (wd == -1) {
-        fprintf(stderr, "[inotify] watch \"%s\" error: %s\n", path,
-                strerror(errno));
-
-        return -1;
-    }
-}
-
-
-static int
-handle_stdin(int fd)
+handle_stdin(inotify_demo_ctx_t *ctx)
 {
     int   n;
     char  buf[MAX_LINE];
 
-    n = readline(fd, buf, MAX_LINE);
+    n = readline(STDIN_FILENO, buf, MAX_LINE);
     if (n == sizeof(STOP) - 1 && strncmp(buf, STOP, sizeof(STOP) - 1) == 0) {
         printf("[inotify] receive stop directive, bye bye...\n");
         exit(EXIT_SUCCESS);
@@ -345,25 +421,25 @@ handle_stdin(int fd)
 
 
 static int
-handle_inotify(int fd)
+handle_inotify(inotify_demo_ctx_t *ctx)
 {
-    int                    i, n;
+    int                    n;
     char                  *p;
     struct inotify_event  *ie;
 
     char buf[INOTIFY_EVENTS_BUF_SIZE]
         __attribute__((aligned(__alignof__(struct inotify_event))));
 
-    n = read(fd, buf, sizeof(buf));
+    n = read(ctx->inotify_fd, buf, sizeof(buf));
     if (n == -1) {
-        perror("[inotify] read from inotify fd failed\n");
+        perror("[inotify] read from inotify fd failed");
         exit(EXIT_FAILURE);
     }
 
     for (p = buf; p + sizeof(struct inotify_event) <= buf + n; /* void */) {
         ie = (struct inotify_event *) p;
 
-        dump_inotify_event(ie);
+        inotify_dump_event(ctx, ie);
 
         p += (sizeof(struct inotify_event) + ie->len);
     }
@@ -412,11 +488,16 @@ again:
 
 
 static void
-dump_inotify_event(struct inotify_event *ie)
+inotify_dump_event(inotify_demo_ctx_t *ctx, struct inotify_event *ie)
 {
-    /* TODO: implement */
+    inotify_wd_node_t  *wn;
 
     printf("[inotify] dump event, wd: %d", ie->wd);
+
+    wn = inotify_rbtree_lookup(ctx, ie->wd);
+    if (wn != NULL) {
+        printf(", rb_path: %s", wn->path);
+    }
 
     if (ie->len > 0) {
         printf(", name: %s", ie->name);
@@ -488,7 +569,7 @@ dump_inotify_event(struct inotify_event *ie)
 
 
 static void
-usage(FILE *fp)
+inotify_usage(FILE *fp)
 {
     fprintf(fp, "\nusage ./inotify [-hvr] -p path -f file\n"
             "\t-h:    print this help and exit\n"
