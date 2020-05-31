@@ -47,6 +47,9 @@ struct rbtree_s {
     (tree)->insert = i
 
 
+typedef void (*rbtree_walk_pt) (rbtree_node_t *node, void *arg);
+
+void rbtree_traverse(rbtree_t *tree, rbtree_walk_pt walker, void *arg);
 void rbtree_insert(rbtree_t *tree, rbtree_node_t *node);
 void rbtree_delete(rbtree_t *tree, rbtree_node_t *node);
 void rbtree_insert_value(rbtree_node_t *root, rbtree_node_t *node,

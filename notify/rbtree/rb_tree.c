@@ -367,3 +367,23 @@ rbtree_next(rbtree_t *tree, rbtree_node_t *node)
     }
 }
 
+
+void
+rbtree_traverse(rbtree_t *tree, rbtree_walk_pt walker, void *arg)
+{
+    rbtree_node_t  *root, *sentinel, *node;
+
+    root = tree->root;
+    sentinel = tree->sentinel;
+
+    if (root == sentinel) {
+        return;
+    }
+
+    for (node = rbtree_min(root, sentinel);
+         node;
+         node = rbtree_next(tree, node))
+    {
+        walker(node, arg);
+    }
+}
