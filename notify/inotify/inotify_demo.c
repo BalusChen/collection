@@ -17,11 +17,20 @@
 
 #define STOP                        "stop"
 #define NEWLINE                     '\n'
+
+/* FIXME: use macros of posix standard */
+
 #define MAX_LINE                    1024
+#define MAX_NAME                    1024
 #define MAX_PATH                    1024
 #define MAX_FILE_PATHS              1024
 #define MAX_EPOLL_EVENTS            10
 #define INOTIFY_EVENTS_BUF_SIZE     (sizeof(struct inotify_event) * 10)
+
+typedef struct {
+    char    old_prefix[1024];
+    char    new_prefix[1024];
+} inotify_rbtree_rename_data_t;
 
 
 typedef struct {
@@ -31,31 +40,34 @@ typedef struct {
 
 
 typedef struct {
-    int             inotify_fd;
+    int                   inotify_fd;
 
     /* cli options */
 
-    unsigned        verbose:1;
-    unsigned        recursive:1;
-    char           *path_file;
+    unsigned              verbose:1;
+    unsigned              recursive:1;
+    char                 *path_file;
 
     /* map wd to path */
 
-    rbtree_t        wd_tree;
-    rbtree_node_t   wd_sentinel;
+    rbtree_t              wd_tree;
+    rbtree_node_t         wd_sentinel;
 
+    struct inotify_event  *last_event;
     /* temporary array to store root paths specified in cli */
 
-    char           *file_paths[MAX_FILE_PATHS];
-    int             next_free_pos;
+    char                 *file_paths[MAX_FILE_PATHS];
+    int                   next_free_pos;
 } inotify_demo_ctx_t;
 
 
+static int inotify_init_ctx(inotify_demo_ctx_t  *ctx);
 static void inotify_parse_options(inotify_demo_ctx_t *ctx, int argc,
     char **argv);
-static void inotify_init_ctx(inotify_demo_ctx_t  *ctx);
+
 static inotify_wd_node_t *inotify_rbtree_lookup(inotify_demo_ctx_t *ctx,
     int wd);
+static void inotify_rbtree_rename_prefix(rbtree_node_t *node, void *arg);
 
 static void inotify_watch_paths(inotify_demo_ctx_t *ctx);
 static int inotify_watch_single_path_recursively(inotify_demo_ctx_t *ctx,
@@ -67,7 +79,10 @@ static int handle_stdin(inotify_demo_ctx_t *ctx);
 static int handle_inotify(inotify_demo_ctx_t *ctx);
 static ssize_t readline(int fd, void *vptr, size_t maxlen);
 static void inotify_usage(FILE *fp);
-static void inotify_dump_event(inotify_demo_ctx_t *ctx,
+
+static void inotify_process_event(inotify_demo_ctx_t *ctx,
+    struct inotify_event *ie);
+static void inotify_dump_event(inotify_wd_node_t *wn,
     struct inotify_event *ie);
 
 
@@ -78,7 +93,9 @@ main(int argc, char **argv)
     inotify_demo_ctx_t  ctx;
     struct epoll_event  ee, events[MAX_EPOLL_EVENTS];
 
-    inotify_init_ctx(&ctx);
+    if (inotify_init_ctx(&ctx) == -1) {
+        exit(EXIT_FAILURE);
+    }
 
     inotify_parse_options(&ctx, argc, argv);
 
@@ -142,46 +159,24 @@ main(int argc, char **argv)
 }
 
 
-static void
+static int
 inotify_init_ctx(inotify_demo_ctx_t *ctx)
 {
     rbtree_init(&ctx->wd_tree, &ctx->wd_sentinel, rbtree_insert_value);
 
     ctx->verbose = 0;
     ctx->recursive = 0;
+
     memset(&ctx->file_paths, 0, sizeof(ctx->file_paths));
     ctx->next_free_pos = 0;
-}
 
-
-static inotify_wd_node_t *
-inotify_rbtree_lookup(inotify_demo_ctx_t *ctx, int wd)
-{
-    rbtree_node_t      *node, *sentinel;
-    inotify_wd_node_t  *wn;
-
-    node = ctx->wd_tree.root;
-    sentinel = &ctx->wd_sentinel;
-
-    while (node != sentinel) {
-
-        if (wd < node->key) {
-            node = node->left;
-            continue;
-        }
-
-        if (wd > node->key) {
-            node = node->right;
-            continue;
-        }
-
-        /* wd == node->key */
-
-        wn = (inotify_wd_node_t *) node;
-        return wn;
+    ctx->last_event = calloc(1, sizeof(struct inotify_event) + MAX_NAME);
+    if (ctx->last_event == NULL) {
+        perror("calloc() error");
+        return -1;
     }
 
-    return NULL;
+    return 0;
 }
 
 
@@ -189,7 +184,7 @@ static void
 inotify_parse_options(inotify_demo_ctx_t *ctx, int argc, char **argv)
 {
     int    len, ch;
-    char   *p, *path, buf[NAME_MAX];
+    char   *p, *path, buf[MAX_NAME];
     FILE  *fp;
 
     while ((ch = getopt(argc, argv, "?hvrf:p:")) != -1) {
@@ -209,6 +204,8 @@ inotify_parse_options(inotify_demo_ctx_t *ctx, int argc, char **argv)
             exit(EXIT_SUCCESS);
 
         case 'p':
+            // FIXME: Don't Repeat Yourself.
+
             if (ctx->next_free_pos == MAX_FILE_PATHS) {
                 fprintf(stderr, "[inotify] too many paths to watch,"
                                 " upper limit: %d", MAX_FILE_PATHS);
@@ -247,7 +244,7 @@ inotify_parse_options(inotify_demo_ctx_t *ctx, int argc, char **argv)
             exit(EXIT_FAILURE);
         }
 
-        while ((path = fgets(buf, NAME_MAX, fp)) != NULL) {
+        while ((path = fgets(buf, MAX_NAME, fp)) != NULL) {
 
             if (ctx->next_free_pos == MAX_FILE_PATHS) {
                 fprintf(stderr, "[inotify] too many file to watch,"
@@ -310,7 +307,7 @@ inotify_watch_single_path_recursively(inotify_demo_ctx_t *ctx, char *path,
     int flags)
 {
     DIR            *dir;
-    char            buf[NAME_MAX];
+    char            buf[MAX_NAME];
     struct dirent  *entry;
 
     dir = opendir(path);
@@ -439,7 +436,10 @@ handle_inotify(inotify_demo_ctx_t *ctx)
     for (p = buf; p + sizeof(struct inotify_event) <= buf + n; /* void */) {
         ie = (struct inotify_event *) p;
 
-        inotify_dump_event(ctx, ie);
+        inotify_process_event(ctx, ie);
+
+        memcpy(ctx->last_event, ie, sizeof(struct inotify_event) + ie->len);
+        ctx->last_event->name[ie->len] = 0;
 
         p += (sizeof(struct inotify_event) + ie->len);
     }
@@ -448,53 +448,107 @@ handle_inotify(inotify_demo_ctx_t *ctx)
 }
 
 
-static ssize_t
-readline(int fd, void *vptr, size_t maxlen)
+static void
+inotify_process_event(inotify_demo_ctx_t *ctx, struct inotify_event *ie)
 {
-    char     c, *ptr;
-    ssize_t  n, rc;
+    char                           buf[1024];
+    inotify_wd_node_t             *wn, *own;
+    inotify_rbtree_rename_data_t   data;
 
-    ptr = vptr;
-    for (n = 1; n < maxlen; n++) {
-again:
-        rc = read(fd, &c, 1);
+    wn = inotify_rbtree_lookup(ctx, ie->wd);
 
-        if (rc == 1) {
+    if (wn == NULL) {
+        return;
+    }
 
-            if (c == NEWLINE) {
-                *ptr = 0;
-                return n - 1;
+    // For debug
+    inotify_dump_event(wn, ie);
+
+    if ((ie->mask & IN_DELETE) && ctx->recursive) {
+        // TODO: process delete event
+    }
+
+    /*
+     * If we last had a MOVED_FROM event but without a MOVED_TO event currently,
+     * the path must have been moved out of tree, so just unwatch it.
+     *
+     */
+
+    /*
+     * FIXME: These two events are usually consecutive in the event
+     *        stream available when reading from the inotify file descriptor.
+     *        However, this is not guaranteed.
+     */
+
+    if (((ctx->last_event->mask & IN_MOVED_FROM) && !(ie->mask & IN_MOVED_TO))
+        || (ie->mask & IN_DELETE_SELF))
+    {
+        if (ctx->verbose) {
+            printf("[inotify] unwatch \"%s\" since it has been"
+                   " removed from tree\n", wn->path);
+        }
+
+        if (inotify_rm_watch(ctx->inotify_fd, ie->wd) == -1) {
+            printf("[inotify] unwatch \"%s\" failed: %s\n", wn->path,
+                   strerror(errno));
+        }
+
+        rbtree_delete(&ctx->wd_tree, &wn->node);
+        free(wn);
+    }
+
+    /*
+     * When rename event occurred and the recursive flag has been set,
+     * we must replace old directory prefix with the new one for all
+     * watched items within this directory.
+     */
+
+    if ((ctx->last_event->mask & IN_MOVED_FROM)
+        && (ie->mask && IN_MOVED_TO)
+        && (ie->cookie == ctx->last_event->cookie))
+    {
+        own = inotify_rbtree_lookup(ctx, ctx->last_event->wd);
+
+        if (own != NULL) {
+
+            // For debug
+            printf("[inotify] o_name: %s, o_path: %s, n_name: %s,"
+                   " n_path: %s\n", ctx->last_event->name, own->path,
+                   ie->name, wn->path);
+
+            sprintf(data.old_prefix, "%s/%s", own->path, ctx->last_event->name);
+            sprintf(data.new_prefix, "%s/%s", wn->path, ie->name);
+
+            if (ctx->verbose) {
+                printf("[inotify] process rename event: old_prefix: %s,"
+                       " new_prefix: %s\n", data.old_prefix, data.new_prefix);
             }
 
-            *ptr++ = c;
-
-        } else if (rc == 0) {
-            *ptr = 0;
-            return n - 1;
-
-        } else {
-
-            if (errno == EINTR) {
-                goto again;
-            }
-
-            return -1;
+            rbtree_traverse(&ctx->wd_tree, inotify_rbtree_rename_prefix, &data);
         }
     }
 
-    *ptr = 0;
-    return n;
+    /*
+     * File moved from unwatched tree or newly created, we treat both
+     * cases as new file creation, and watch it in recursive mode.
+     */
+
+    if (ctx->recursive
+        && ((!(ctx->last_event->mask & IN_MOVED_FROM)
+             && (ie->mask & IN_MOVED_TO))
+            || (ie->mask & IN_CREATE)))
+    {
+        sprintf(buf, "%s/%s", wn->path, ie->name);
+        inotify_watch_single_path_recursively(ctx, buf, IN_ALL_EVENTS);
+    }
 }
 
 
 static void
-inotify_dump_event(inotify_demo_ctx_t *ctx, struct inotify_event *ie)
+inotify_dump_event(inotify_wd_node_t *wn, struct inotify_event *ie)
 {
-    inotify_wd_node_t  *wn;
-
     printf("[inotify] dump event, wd: %d", ie->wd);
 
-    wn = inotify_rbtree_lookup(ctx, ie->wd);
     if (wn != NULL) {
         printf(", rb_path: %s", wn->path);
     }
@@ -565,6 +619,101 @@ inotify_dump_event(inotify_demo_ctx_t *ctx, struct inotify_event *ie)
     }
 
     printf("\n");
+}
+
+
+static void
+inotify_rbtree_rename_prefix(rbtree_node_t *node, void *arg)
+{
+    int                            len, plen;
+    char                          buf[1024];
+    inotify_wd_node_t             *wn;
+    inotify_rbtree_rename_data_t  *data;
+
+    wn = (inotify_wd_node_t *) node;
+    data = (inotify_rbtree_rename_data_t *) arg;
+
+    len = strlen(wn->path);
+    plen = strlen(data->old_prefix);
+
+    if (len >= plen && strncmp(data->old_prefix, wn->path, plen) == 0) {
+        printf("[inotify] rename from \"%s\" to ", wn->path);
+
+        strncpy(buf, &wn->path[plen], len - plen + 1);
+        sprintf(wn->path, "%s%s", data->new_prefix, buf);
+
+        printf("\"%s\"\n", wn->path);
+    }
+}
+
+
+static inotify_wd_node_t *
+inotify_rbtree_lookup(inotify_demo_ctx_t *ctx, int wd)
+{
+    rbtree_node_t      *node, *sentinel;
+    inotify_wd_node_t  *wn;
+
+    node = ctx->wd_tree.root;
+    sentinel = &ctx->wd_sentinel;
+
+    while (node != sentinel) {
+
+        if (wd < node->key) {
+            node = node->left;
+            continue;
+        }
+
+        if (wd > node->key) {
+            node = node->right;
+            continue;
+        }
+
+        /* wd == node->key */
+
+        wn = (inotify_wd_node_t *) node;
+        return wn;
+    }
+
+    return NULL;
+}
+
+
+static ssize_t
+readline(int fd, void *vptr, size_t maxlen)
+{
+    char     c, *ptr;
+    ssize_t  n, rc;
+
+    ptr = vptr;
+    for (n = 1; n < maxlen; n++) {
+        again:
+        rc = read(fd, &c, 1);
+
+        if (rc == 1) {
+
+            if (c == NEWLINE) {
+                *ptr = 0;
+                return n - 1;
+            }
+
+            *ptr++ = c;
+
+        } else if (rc == 0) {
+            *ptr = 0;
+            return n - 1;
+
+        } else {
+
+            if (errno == EINTR) {
+                goto again;
+            }
+
+            return -1;
+        }
+    }
+
+    *ptr = 0;
+    return n;
 }
 
 
