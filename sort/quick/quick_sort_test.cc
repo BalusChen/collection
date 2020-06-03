@@ -4,7 +4,7 @@
  */
 
 
-#include "quick_sort.h"
+#include <quick_sort.hh>
 
 
 static void print_vector(const std::vector<int> &);

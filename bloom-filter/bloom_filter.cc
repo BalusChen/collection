@@ -3,8 +3,8 @@
  * Copyright (C) Jianyong Chen
  */
 
-#include "../include/hash.h"
 #include <vector>
+#include <hash.hh>
 
 
 static uint32_t BloomHash(const std::string &key) {
