@@ -4,6 +4,7 @@
  */
 
 
+#include <stdio.h>
 #include <quick_sort.hh>
 
 
