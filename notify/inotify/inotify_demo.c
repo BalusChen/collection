@@ -12,7 +12,7 @@
 #include <sys/inotify.h>
 #include <sys/epoll.h>
 
-#include "../rbtree/rb_tree.h"
+#include <rb_tree.h>
 
 
 #define STOP                        "stop"
@@ -40,24 +40,24 @@ typedef struct {
 
 
 typedef struct {
-    int                   inotify_fd;
+    int                    inotify_fd;
 
     /* cli options */
 
-    unsigned              verbose:1;
-    unsigned              recursive:1;
-    char                 *path_file;
+    unsigned               verbose:1;
+    unsigned               recursive:1;
+    char                  *path_file;
 
     /* map wd to path */
 
-    rbtree_t              wd_tree;
-    rbtree_node_t         wd_sentinel;
+    rbtree_t               wd_tree;
+    rbtree_node_t          wd_sentinel;
 
     struct inotify_event  *last_event;
     /* temporary array to store root paths specified in cli */
 
-    char                 *file_paths[MAX_FILE_PATHS];
-    int                   next_free_pos;
+    char                  *file_paths[MAX_FILE_PATHS];
+    int                    next_free_pos;
 } inotify_demo_ctx_t;
 
 
@@ -463,6 +463,18 @@ inotify_process_event(inotify_demo_ctx_t *ctx, struct inotify_event *ie)
 
     // For debug
     inotify_dump_event(wn, ie);
+
+    /*
+     * NOTE: 如果是 DELETE 事件，说明是监听的目录下面的子目录/文件被删除产生的事件，
+     *       而只有在 recursive 模式，才会递归监听，然而，只要监听了，那么就还会产生
+     *       DELETE_SELF 事件。
+     *       而对于非 recursive 模式，由于并没有将其添加到 inotify 和红黑树，所以也
+     *       不用将其从中移除；所以实际上只需要处理 DELETE_SELF 事件即可。
+     *
+     * NOTE: recursive 模式下，删除了某个父目录，除了该父目录本身外，其下被监听的子
+     *       目录/文件也会发出 DELETE_SELF 事件（其后还跟着一个 IGNORED 事件），
+     *       所以就算是 recursive 模式，也不用递归删除。
+     */
 
     if ((ie->mask & IN_DELETE) && ctx->recursive) {
         // TODO: process delete event
