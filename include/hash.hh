@@ -3,6 +3,7 @@
 
 
 #include <string>
+#include <string.h>
 
 
 static uint32_t DecodeFixed32(const char *ptr) {
