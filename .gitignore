@@ -1,1 +1,5 @@
 .ccls-cache/*
+.idea/
+cmake-build-debug/
+*.o
+a.out
