@@ -4,7 +4,7 @@ MESSAGE(STATUS "[balus] build notify demos, including inotify, kqueue, eventfd")
 MESSAGE(STATUS "[balus] notify project directory: ${PROJECT_BINARY_DIR}")
 MESSAGE(STATUS "[balus] notify source directory: ${PROJECT_SOURCE_DIR}")
 
-IF(UNIX)
+IF(UNIX AND NOT APPLE)
 
     MESSAGE(STATUS "[bulus] on Linux, compile inotify and eventfd demos")
 
